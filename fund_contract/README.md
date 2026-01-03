@@ -57,6 +57,8 @@ The platform admin initializes a `GlobalConfig` PDA that pins:
 - Fee bps for deposit/withdraw/trade.
 - A fee treasury address.
 - Minimum manager deposit for fund creation.
+- Keeper address for order execution.
+- Max slippage bps used as an oracle-based guardrail for orders.
 
 ### Whitelists
 There are two levels of whitelists:
@@ -66,6 +68,7 @@ There are two levels of whitelists:
 ### Fund State
 - Each fund has its own `FundState` PDA with a share mint and a program-owned SOL vault.
 - Funds track `enabled_token_count` which is used to enforce complete NAV calculation.
+- `fund_type` determines Trading vs Strategy behavior (immutable after creation).
 
 ### Shares
 - Shares are SPL tokens minted by the fund PDA.
@@ -80,6 +83,11 @@ There are two levels of whitelists:
 - Share mint: `["shares", fund]`
 - Fund vault: `["vault", fund]` (program-owned SOL account)
 - Withdraw request: `["withdraw", fund, investor]`
+- Limit order: `["limit_order", fund, order_id]`
+- DCA order: `["dca_order", fund, order_id]`
+- Order vault auth: `["limit_order_vault_auth", order]` / `["dca_order_vault_auth", order]`
+- Order SOL vault: `["limit_order_sol_vault", order]` / `["dca_order_sol_vault", order]`
+- Strategy config: `["strategy", fund]`
 
 Token vaults are ATAs for `(fund PDA, mint)`.
 
@@ -94,60 +102,114 @@ Each instruction implements the flows described in `SPEC.md`. This section expla
 2. **update_global_config** (admin)
    - Updates the fee parameters, treasury address, and pinned oracle info for an existing `GlobalConfig`.
 
-3. **initialize_fund** (manager)
+3. **set_keeper** (admin)
+    - Rotates the keeper key used for limit/DCA order execution.
+
+4. **revoke_keeper** (admin)
+    - Revokes keeper access by setting the keeper to the default pubkey.
+
+5. **initialize_fund** (manager)
    - Creates `FundState`, the share mint, and the fund SOL vault.
    - Transfers the minimum manager deposit into the fund vault.
    - Mints initial shares to the manager equal to the initial deposit amount.
 
-4. **add_token (global scope)** (admin)
+6. **add_token (global scope)** (admin)
    - Creates a `GlobalWhitelist` PDA for a mint and stores mint decimals and the token/USD Pyth feed.
 
-5. **add_token (fund scope)** (manager)
+7. **add_token (fund scope)** (manager)
    - Requires a matching, enabled `GlobalWhitelist`.
    - Creates a `FundWhitelist` PDA for `(fund, mint)`.
    - Ensures the fund token vault ATA `(fund, mint)` exists (creates if missing).
    - Increments `enabled_token_count`.
 
-6. **remove_token (global scope)** (admin)
+8. **remove_token (global scope)** (admin)
    - Closes the `GlobalWhitelist` PDA for the mint.
 
-7. **remove_token (fund scope)** (manager)
+9. **remove_token (fund scope)** (manager)
    - Requires the fund token vault ATA `(fund, mint)` balance is `0`.
    - Closes the `FundWhitelist` PDA.
    - Decrements `enabled_token_count`.
 
-8. **deposit** (investor)
+10. **deposit** (investor)
    - Transfers deposit fee lamports to `fee_treasury` and the remaining lamports to the fund vault.
    - Computes NAV using SOL + enabled token vault balances and pinned Pyth feeds.
    - Mints shares proportional to `net_lamports / NAV` (rejects if this would mint 0 shares).
    - Increments `total_shares`.
 
-9. **request_withdraw** (investor)
+11. **request_withdraw** (investor)
    - Creates/updates the withdraw request PDA for `(fund, investor)`.
    - Records requested shares and the request timestamp.
 
-10. **cancel_withdraw** (investor)
-    - Closes the withdraw request PDA and refunds its rent to the investor.
+12. **cancel_withdraw** (investor)
+   - Closes the withdraw request PDA and refunds its rent to the investor.
 
-11. **execute_withdraw** (investor)
-    - Requires the timelock has elapsed.
-    - Recomputes NAV and computes the pro-rata SOL payout.
-    - Burns shares.
-    - Transfers SOL from the fund vault to the investor and fee treasury.
-    - Closes the withdraw request PDA.
+13. **execute_withdraw** (investor)
+   - Requires the timelock has elapsed.
+   - Recomputes NAV and computes the pro-rata SOL payout.
+   - Burns shares.
+   - Transfers SOL from the fund vault to the investor and fee treasury.
+   - Closes the withdraw request PDA.
 
-12. **borrow_for_swap** (manager)
-    - Requires fund is unlocked and `min_out > 0`.
-    - Requires a valid `settle_swap` instruction later in the same transaction (validated via the instructions sysvar + account metas).
-    - Locks the fund and records snapshots (`snapshot_sol`, `snapshot_output`) plus trade parameters (`borrow_amount`, `expected_min_out`, `output_mint`).
-    - Moves SOL from the fund vault to the manager via manual lamport manipulation.
+14. **borrow_for_swap** (manager)
+   - Requires fund is unlocked and `min_out > 0`.
+   - Requires a valid `settle_swap` instruction later in the same transaction (validated via the instructions sysvar + account metas).
+   - Locks the fund and records snapshots (`snapshot_sol`, `snapshot_output`) plus trade parameters (`borrow_amount`, `expected_min_out`, `output_mint`).
+   - Moves SOL from the fund vault to the manager via manual lamport manipulation.
 
-13. **settle_swap** (manager)
-    - Requires the fund is locked.
-    - Validates the output whitelist PDA and output token vault ATA.
-    - Requires the SOL vault balance equals `snapshot_sol - borrow_amount`.
-    - Requires output token increase is at least `expected_min_out`.
-    - Unlocks the fund and clears trade state.
+15. **settle_swap** (manager)
+   - Requires the fund is locked.
+   - Validates the output whitelist PDA and output token vault ATA.
+   - Requires the SOL vault balance equals `snapshot_sol - borrow_amount`.
+   - Requires output token increase is at least `expected_min_out`.
+   - Unlocks the fund and clears trade state.
+
+16. **create_limit_order** (manager)
+    - Creates a per-order PDA and escrows the spending asset.
+    - BUY: moves SOL from fund vault to order SOL vault; creates WSOL ATA for order vault auth.
+    - SELL: moves tokens from fund token vault to order token vault ATA.
+    - Stores limit price, min_out, and oracle feed info.
+
+17. **execute_limit_order** (keeper)
+    - Validates order status and price trigger.
+    - Verifies oracle feed key/owner, staleness, confidence.
+    - Executes Jupiter CPI from escrow vault to fund vaults.
+    - Enforces `min_out` and oracle-based slippage guard.
+    - Marks order executed and closes order vaults.
+
+18. **cancel_limit_order** (manager)
+    - Refunds escrow back to fund vaults.
+    - Closes order vaults and order PDA.
+
+19. **create_dca_order** (manager)
+    - Creates a per-order PDA and escrows the spending asset.
+    - BUY: moves SOL into DCA SOL vault; creates WSOL ATA for order vault auth.
+    - SELL: moves tokens into DCA token vault ATA.
+    - Stores total amount, slice amount, interval, and next_exec_ts.
+
+20. **execute_dca_order** (keeper)
+    - Requires `now >= next_exec_ts` and order not expired.
+    - Executes one slice via Jupiter CPI.
+    - Enforces `min_out` and oracle-based slippage guard.
+    - Updates `remaining_amount` and schedules next execution.
+    - Closes vaults and updates counters when complete.
+
+21. **cancel_dca_order** (manager)
+    - Refunds escrow back to fund vaults.
+    - Closes DCA token vault and updates active DCA count.
+
+22. **initialize_strategy_fund** (manager)
+    - Creates a Strategy fund (immutable fund type).
+    - Same setup as initialize_fund, but with `fund_type = Strategy`.
+
+23. **set_strategy** (manager, one-time)
+    - Creates the StrategyConfig PDA.
+    - Stores target allocations (max 8 tokens).
+    - Requires allocations sum to 10,000 bps and match enabled fund whitelist.
+
+24. **rebalance_strategy** (keeper)
+    - Rebalances one token per call based on NAV and target weights.
+    - Uses Jupiter CPI to buy/sell via fund vaults.
+    - Enforces cooldown, threshold, `min_out`, and oracle-based slippage guard.
 
 ## NAV Calculation
 
@@ -186,6 +248,9 @@ Requirements:
 - Oracle feeds pinned by pubkey and owner.
 - `borrow_for_swap` and `settle_swap` must be in the same transaction.
 - Borrow/settle instruction metas must match the fund accounts.
+- Limit/DCA execution is keeper-only and uses pinned Jupiter program id.
+- Order escrow vaults must be canonical PDAs/ATAs for their seeds.
+- Strategy funds disable trading instructions (borrow/settle, limit, DCA).
 
 ## Hard Problems We Solved (and How)
 

@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::TokenAccount;
 
 use crate::errors::ErrorCode;
-use crate::state::fund::{FundState, FundVault};
+use crate::state::fund::{FundState, FundVault, FUND_TYPE_TRADING};
 use crate::state::global_config::GlobalConfig;
 use crate::state::whitelist::FundWhitelist;
 
@@ -10,6 +10,10 @@ pub fn settle_swap<'info>(
     ctx: Context<'_, '_, 'info, 'info, SettleSwap<'info>>,
 ) -> Result<()> {
     require!(ctx.accounts.fund_state.is_locked, ErrorCode::FundNotLocked);
+    require!(
+        ctx.accounts.fund_state.fund_type == FUND_TYPE_TRADING,
+        ErrorCode::InvalidFundType
+    );
     require!(
         ctx.accounts.fund_state.manager == ctx.accounts.manager.key(),
         ErrorCode::Unauthorized

@@ -47,6 +47,8 @@ pub fn execute_withdraw<'info>(
         ctx.accounts.config.sol_usd_pyth_feed,
         ctx.accounts.config.pyth_program_id,
         ctx.accounts.fund_state.enabled_token_count,
+        ctx.accounts.fund_state.active_limit_count,
+        ctx.accounts.fund_state.active_dca_count,
         ctx.remaining_accounts,
     )?;
     require!(nav_lamports > 0, ErrorCode::MathOverflow);

@@ -248,6 +248,131 @@ describe("deposit", () => {
     await removeFundToken(ctx, tokenB);
   });
 
+  it("Rejects deposit when open limit orders are not provided", async () => {
+    const ctx = await getContext();
+    await ensureGlobalConfig(ctx);
+    await ensureFund(ctx);
+    await airdropIfNeeded(
+      ctx.provider,
+      ctx.investor.publicKey,
+      2 * anchor.web3.LAMPORTS_PER_SOL,
+    );
+    await airdropIfNeeded(ctx.provider, ctx.solPythFeed, 1);
+
+    const token = await addFundToken(ctx);
+    await airdropIfNeeded(ctx.provider, token.tokenPythFeed, 1);
+
+    const fundState = await ctx.program.account.fundState.fetch(ctx.fundPda);
+    const orderId = new anchor.BN(fundState.nextOrderId.toString());
+    const orderPda = anchor.web3.PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("limit_order"),
+        ctx.fundPda.toBuffer(),
+        orderId.toArrayLike(Buffer, "le", 8),
+      ],
+      ctx.program.programId,
+    )[0];
+    const orderVaultAuth = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("limit_order_vault_auth"), orderPda.toBuffer()],
+      ctx.program.programId,
+    )[0];
+    const orderSolVault = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("limit_order_sol_vault"), orderPda.toBuffer()],
+      ctx.program.programId,
+    )[0];
+    const orderTokenVault = await anchor.utils.token.associatedAddress({
+      mint: new anchor.web3.PublicKey(
+        "So11111111111111111111111111111111111111112",
+      ),
+      owner: orderVaultAuth,
+    });
+
+    await ctx.program.methods
+      .createLimitOrder(
+        0,
+        new anchor.BN(10_000),
+        new anchor.BN(1),
+        new anchor.BN(1),
+        0,
+        new anchor.BN(0),
+      )
+      .accounts({
+        manager: ctx.provider.wallet.publicKey,
+        config: ctx.configPda,
+        fundState: ctx.fundPda,
+        fundVault: ctx.vaultPda,
+        mint: token.mint,
+        whitelist: token.fundWhitelistPda,
+        order: orderPda,
+        orderSolVault,
+        orderVaultAuth,
+        orderTokenVault,
+        fundTokenVault: token.fundTokenVault,
+        wsolMint: new anchor.web3.PublicKey(
+          "So11111111111111111111111111111111111111112",
+        ),
+        systemProgram: anchor.web3.SystemProgram.programId,
+        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+        associatedTokenProgram: anchor.utils.token.ASSOCIATED_PROGRAM_ID,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      })
+      .rpc();
+
+    const investorShareAccount =
+      await anchor.utils.token.associatedAddress({
+        mint: ctx.shareMintPda,
+        owner: ctx.investor.publicKey,
+      });
+    const amountLamports = new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 4);
+
+    await expectError(
+      ctx.program.methods
+        .deposit(amountLamports)
+        .accounts({
+          investor: ctx.investor.publicKey,
+          config: ctx.configPda,
+          fundState: ctx.fundPda,
+          fundVault: ctx.vaultPda,
+          shareMint: ctx.shareMintPda,
+          investorShareAccount,
+          feeTreasury: ctx.feeTreasury.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+          associatedTokenProgram: anchor.utils.token.ASSOCIATED_PROGRAM_ID,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .remainingAccounts([
+          { pubkey: ctx.solPythFeed, isWritable: false, isSigner: false },
+          { pubkey: token.fundWhitelistPda, isWritable: false, isSigner: false },
+          { pubkey: token.fundTokenVault, isWritable: false, isSigner: false },
+          { pubkey: token.tokenPythFeed, isWritable: false, isSigner: false },
+        ])
+        .signers([ctx.investor])
+        .rpc(),
+      "InvalidRemainingAccounts",
+    );
+
+    await ctx.program.methods
+      .cancelLimitOrder(orderId)
+      .accounts({
+        manager: ctx.provider.wallet.publicKey,
+        config: ctx.configPda,
+        fundState: ctx.fundPda,
+        fundVault: ctx.vaultPda,
+        whitelist: token.fundWhitelistPda,
+        fundTokenVault: token.fundTokenVault,
+        order: orderPda,
+        orderSolVault,
+        orderVaultAuth,
+        orderTokenVault,
+        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    await removeFundToken(ctx, token);
+  });
+
   it("Deposits SOL and mints shares", async () => {
     const ctx = await getContext();
     await ensureGlobalConfig(ctx);
@@ -373,11 +498,13 @@ describe("deposit", () => {
     await ctx.program.methods
       .updateGlobalConfig(
         ctx.configId,
+        configBefore.keeper,
         configBefore.solUsdPythFeed,
         configBefore.pythProgramId,
         10_000,
         configBefore.withdrawFeeBps,
         configBefore.tradeFeeBps,
+        configBefore.maxSlippageBps,
         configBefore.minManagerDepositLamports,
       )
       .accounts({
@@ -417,11 +544,13 @@ describe("deposit", () => {
     await ctx.program.methods
       .updateGlobalConfig(
         ctx.configId,
+        configBefore.keeper,
         configBefore.solUsdPythFeed,
         configBefore.pythProgramId,
         configBefore.depositFeeBps,
         configBefore.withdrawFeeBps,
         configBefore.tradeFeeBps,
+        configBefore.maxSlippageBps,
         configBefore.minManagerDepositLamports,
       )
       .accounts({

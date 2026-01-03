@@ -8,6 +8,7 @@ export type TestContext = {
   provider: anchor.AnchorProvider;
   configId: anchor.BN;
   configPda: anchor.web3.PublicKey;
+  keeper: anchor.web3.PublicKey;
   fundId: anchor.BN;
   fundPda: anchor.web3.PublicKey;
   shareMintPda: anchor.web3.PublicKey;
@@ -68,6 +69,7 @@ export const getContext = async (): Promise<TestContext> => {
         provider,
         configId,
         configPda,
+        keeper: provider.wallet.publicKey,
         fundId,
         fundPda,
         shareMintPda,
@@ -122,6 +124,16 @@ export const expectError = async (promise: Promise<string>, code: string) => {
   }
 };
 
+export const getClockUnixTimestamp = async (
+  connection: anchor.web3.Connection,
+) => {
+  const info = await connection.getAccountInfo(anchor.web3.SYSVAR_CLOCK_PUBKEY);
+  if (!info?.data || info.data.length < 40) {
+    return Math.floor(Date.now() / 1000);
+  }
+  return Number(info.data.readBigInt64LE(32));
+};
+
 export const ensureGlobalConfig = async (ctx: TestContext) => {
   const info = await ctx.provider.connection.getAccountInfo(ctx.configPda);
   if (info) {
@@ -141,11 +153,13 @@ export const ensureGlobalConfig = async (ctx: TestContext) => {
   await ctx.program.methods
     .initializeGlobalConfig(
       ctx.configId,
+      ctx.keeper,
       ctx.solPythFeed,
       ctx.pythProgramId,
       50,
       25,
       10,
+      100,
       new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 10),
     )
     .accounts({

@@ -6,7 +6,7 @@ use anchor_lang::solana_program::sysvar::instructions::ID as IX_SYSVAR_ID;
 use anchor_spl::token::TokenAccount;
 
 use crate::errors::ErrorCode;
-use crate::state::fund::{FundState, FundVault};
+use crate::state::fund::{FundState, FundVault, FUND_TYPE_TRADING};
 use crate::state::global_config::GlobalConfig;
 use crate::state::whitelist::FundWhitelist;
 
@@ -18,6 +18,10 @@ pub fn borrow_for_swap<'info>(
     require!(!ctx.accounts.fund_state.is_locked, ErrorCode::FundLocked);
     require!(amount_in > 0, ErrorCode::MathOverflow);
     require!(min_amount_out > 0, ErrorCode::InvalidMinOut);
+    require!(
+        ctx.accounts.fund_state.fund_type == FUND_TYPE_TRADING,
+        ErrorCode::InvalidFundType
+    );
 
     require!(
         ctx.accounts.fund_state.manager == ctx.accounts.manager.key(),

@@ -7,6 +7,9 @@ use crate::errors::ErrorCode;
 use crate::state::fund::{FundState, FundVault};
 use crate::state::global_config::GlobalConfig;
 use crate::state::whitelist::FundWhitelist;
+use crate::state::limit_order::{LimitOrder, ORDER_STATUS_OPEN, SIDE_BUY, SIDE_SELL};
+use crate::state::dca_order::{DcaOrder, DCA_STATUS_OPEN, DCA_SIDE_BUY, DCA_SIDE_SELL};
+use anchor_spl::token::spl_token::native_mint;
 
 const ORACLE_MAX_AGE_SECS: u64 = 60;
 const LAMPORTS_PER_SOL_U64: u64 = 1_000_000_000;
@@ -39,6 +42,8 @@ pub fn deposit<'info>(
         ctx.accounts.config.sol_usd_pyth_feed,
         ctx.accounts.config.pyth_program_id,
         ctx.accounts.fund_state.enabled_token_count,
+        ctx.accounts.fund_state.active_limit_count,
+        ctx.accounts.fund_state.active_dca_count,
         ctx.remaining_accounts,
     )?;
 
@@ -161,26 +166,33 @@ pub(crate) fn compute_nav_lamports<'info>(
     sol_usd_pyth_feed: Pubkey,
     pyth_program_id: Pubkey,
     enabled_token_count: u16,
+    active_limit_count: u16,
+    active_dca_count: u16,
     remaining: &'info [AccountInfo<'info>],
 ) -> Result<u64> {
     let mut nav = sol_lamports as i128;
 
     if enabled_token_count == 0 {
         require!(
-            remaining.is_empty(),
+            remaining.is_empty() && active_limit_count == 0 && active_dca_count == 0,
             ErrorCode::InvalidRemainingAccounts
         );
         return Ok(nav as u64);
     }
 
+    let base_len = 1 + 3 * (enabled_token_count as usize);
+    let limit_len = 3 * (active_limit_count as usize);
+    let dca_len = 3 * (active_dca_count as usize);
+    let expected_len = base_len + limit_len + dca_len;
     require!(
-        remaining.len() == 1 + 3 * (enabled_token_count as usize),
+        remaining.len() == expected_len,
         ErrorCode::InvalidRemainingAccounts
     );
 
     let mut idx = 1;
     let mut prev_mint: Option<Pubkey> = None;
-    while idx < remaining.len() {
+    let mut token_prices: Vec<(Pubkey, u8, i64, i32)> = Vec::new();
+    while idx < base_len {
         let whitelist_info = &remaining[idx];
         let whitelist: Account<FundWhitelist> = Account::try_from(whitelist_info)?;
         let (expected_whitelist, _) = Pubkey::find_program_address(
@@ -203,6 +215,7 @@ pub(crate) fn compute_nav_lamports<'info>(
             );
         }
         prev_mint = Some(whitelist.mint);
+        token_prices.push((whitelist.mint, whitelist.decimals, 0, 0));
         idx += 3;
     }
 
@@ -219,7 +232,7 @@ pub(crate) fn compute_nav_lamports<'info>(
     let sol_price = load_pyth_price(sol_price_info, &clock)?;
 
     let mut idx = 1;
-    while idx < remaining.len() {
+    while idx < base_len {
         let whitelist_info = &remaining[idx];
         let token_vault_info = &remaining[idx + 1];
         let token_price_info = &remaining[idx + 2];
@@ -256,9 +269,179 @@ pub(crate) fn compute_nav_lamports<'info>(
             sol_price.price,
             sol_price.expo,
         )?;
+        if let Some(entry) = token_prices
+            .iter_mut()
+            .find(|entry| entry.0 == whitelist.mint)
+        {
+            entry.2 = token_price.price;
+            entry.3 = token_price.expo;
+        }
         nav = nav
             .checked_add(value as i128)
             .ok_or(ErrorCode::MathOverflow)?;
+    }
+
+    let mut order_idx = base_len;
+    let mut prev_order: Option<Pubkey> = None;
+    for _ in 0..active_limit_count {
+        let order_info = &remaining[order_idx];
+        let order_sol_info = &remaining[order_idx + 1];
+        let order_token_info = &remaining[order_idx + 2];
+        order_idx += 3;
+
+        if let Some(prev) = prev_order {
+            require!(
+                prev.to_bytes() < order_info.key.to_bytes(),
+                ErrorCode::InvalidRemainingAccounts
+            );
+        }
+        prev_order = Some(*order_info.key);
+
+        let order: Account<LimitOrder> = Account::try_from(order_info)?;
+        require!(order.fund == fund_key, ErrorCode::InvalidTokenVault);
+        require!(order.status == ORDER_STATUS_OPEN, ErrorCode::OrderNotOpen);
+
+        let (vault_auth, _bump) = Pubkey::find_program_address(
+            &[b"limit_order_vault_auth", order_info.key.as_ref()],
+            program_id,
+        );
+        let (expected_sol_vault, _) = Pubkey::find_program_address(
+            &[b"limit_order_sol_vault", order_info.key.as_ref()],
+            program_id,
+        );
+        require!(
+            expected_sol_vault == *order_sol_info.key,
+            ErrorCode::InvalidOrderVault
+        );
+
+        match order.side {
+            SIDE_BUY => {
+                let expected_token_vault =
+                    anchor_spl::associated_token::get_associated_token_address(
+                        &vault_auth,
+                        &native_mint::ID,
+                    );
+                require!(
+                    expected_token_vault == *order_token_info.key,
+                    ErrorCode::InvalidOrderVault
+                );
+                nav = nav
+                    .checked_add(order_sol_info.lamports() as i128)
+                    .ok_or(ErrorCode::MathOverflow)?;
+            }
+            SIDE_SELL => {
+                let expected_token_vault =
+                    anchor_spl::associated_token::get_associated_token_address(
+                        &vault_auth,
+                        &order.mint,
+                    );
+                require!(
+                    expected_token_vault == *order_token_info.key,
+                    ErrorCode::InvalidOrderVault
+                );
+                let order_token: Account<TokenAccount> =
+                    Account::try_from(order_token_info)?;
+                require!(order_token.mint == order.mint, ErrorCode::InvalidOrderVault);
+                require!(order_token.owner == vault_auth, ErrorCode::InvalidOrderVault);
+                let token_info = token_prices
+                    .iter()
+                    .find(|entry| entry.0 == order.mint)
+                    .ok_or(ErrorCode::InvalidTokenVault)?;
+                let value = token_value_in_lamports(
+                    order_token.amount,
+                    token_info.1,
+                    token_info.2,
+                    token_info.3,
+                    sol_price.price,
+                    sol_price.expo,
+                )?;
+                nav = nav
+                    .checked_add(value as i128)
+                    .ok_or(ErrorCode::MathOverflow)?;
+            }
+            _ => return err!(ErrorCode::InvalidOrderSide),
+        }
+    }
+
+    let mut prev_dca: Option<Pubkey> = None;
+    for _ in 0..active_dca_count {
+        let order_info = &remaining[order_idx];
+        let order_sol_info = &remaining[order_idx + 1];
+        let order_token_info = &remaining[order_idx + 2];
+        order_idx += 3;
+
+        if let Some(prev) = prev_dca {
+            require!(
+                prev.to_bytes() < order_info.key.to_bytes(),
+                ErrorCode::InvalidRemainingAccounts
+            );
+        }
+        prev_dca = Some(*order_info.key);
+
+        let order: Account<DcaOrder> = Account::try_from(order_info)?;
+        require!(order.fund == fund_key, ErrorCode::InvalidTokenVault);
+        require!(order.status == DCA_STATUS_OPEN, ErrorCode::OrderNotOpen);
+
+        let (vault_auth, _bump) = Pubkey::find_program_address(
+            &[b"dca_order_vault_auth", order_info.key.as_ref()],
+            program_id,
+        );
+        let (expected_sol_vault, _) = Pubkey::find_program_address(
+            &[b"dca_order_sol_vault", order_info.key.as_ref()],
+            program_id,
+        );
+        require!(
+            expected_sol_vault == *order_sol_info.key,
+            ErrorCode::InvalidOrderVault
+        );
+
+        match order.side {
+            DCA_SIDE_BUY => {
+                let expected_token_vault =
+                    anchor_spl::associated_token::get_associated_token_address(
+                        &vault_auth,
+                        &native_mint::ID,
+                    );
+                require!(
+                    expected_token_vault == *order_token_info.key,
+                    ErrorCode::InvalidOrderVault
+                );
+                nav = nav
+                    .checked_add(order_sol_info.lamports() as i128)
+                    .ok_or(ErrorCode::MathOverflow)?;
+            }
+            DCA_SIDE_SELL => {
+                let expected_token_vault =
+                    anchor_spl::associated_token::get_associated_token_address(
+                        &vault_auth,
+                        &order.mint,
+                    );
+                require!(
+                    expected_token_vault == *order_token_info.key,
+                    ErrorCode::InvalidOrderVault
+                );
+                let order_token: Account<TokenAccount> =
+                    Account::try_from(order_token_info)?;
+                require!(order_token.mint == order.mint, ErrorCode::InvalidOrderVault);
+                require!(order_token.owner == vault_auth, ErrorCode::InvalidOrderVault);
+                let token_info = token_prices
+                    .iter()
+                    .find(|entry| entry.0 == order.mint)
+                    .ok_or(ErrorCode::InvalidTokenVault)?;
+                let value = token_value_in_lamports(
+                    order_token.amount,
+                    token_info.1,
+                    token_info.2,
+                    token_info.3,
+                    sol_price.price,
+                    sol_price.expo,
+                )?;
+                nav = nav
+                    .checked_add(value as i128)
+                    .ok_or(ErrorCode::MathOverflow)?;
+            }
+            _ => return err!(ErrorCode::InvalidOrderSide),
+        }
     }
 
     require!(nav > 0, ErrorCode::InvalidNav);

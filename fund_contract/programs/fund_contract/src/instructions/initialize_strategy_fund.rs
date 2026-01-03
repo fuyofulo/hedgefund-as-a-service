@@ -3,11 +3,11 @@ use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{mint_to, Mint, MintTo, Token, TokenAccount};
 
 use crate::errors::ErrorCode;
-use crate::state::fund::{FundState, FundVault, FUND_TYPE_TRADING};
+use crate::state::fund::{FundState, FundVault, FUND_TYPE_STRATEGY};
 use crate::state::global_config::GlobalConfig;
 
-pub fn initialize_fund(
-    ctx: Context<InitializeFund>,
+pub fn initialize_strategy_fund(
+    ctx: Context<InitializeStrategyFund>,
     fund_id: u64,
     min_investor_deposit_lamports: u64,
     withdraw_timelock_secs: i64,
@@ -21,7 +21,7 @@ pub fn initialize_fund(
     fund.config = config.key();
     fund.manager = ctx.accounts.manager.key();
     fund.fund_id = fund_id;
-    fund.fund_type = FUND_TYPE_TRADING;
+    fund.fund_type = FUND_TYPE_STRATEGY;
     fund.share_mint = ctx.accounts.share_mint.key();
     fund.vault = ctx.accounts.fund_vault.key();
     fund.total_shares = deposit_lamports;
@@ -78,7 +78,7 @@ pub fn initialize_fund(
 
 #[derive(Accounts)]
 #[instruction(fund_id: u64)]
-pub struct InitializeFund<'info> {
+pub struct InitializeStrategyFund<'info> {
     #[account(mut)]
     pub manager: Signer<'info>,
     pub config: Account<'info, GlobalConfig>,
