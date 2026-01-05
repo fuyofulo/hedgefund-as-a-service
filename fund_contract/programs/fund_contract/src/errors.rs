@@ -81,7 +81,7 @@ pub enum ErrorCode {
     #[msg("Invalid fund type for this instruction.")]
     InvalidFundType,
     #[msg("Invalid strategy configuration.")]
-    InvalidStrategyConfig,
+    InvalidStrategy,
     #[msg("Rebalance not needed.")]
     RebalanceNotNeeded,
     #[msg("WSOL must be swept before rebalance.")]

@@ -11,6 +11,7 @@ export type TestContext = {
   keeper: anchor.web3.PublicKey;
   fundId: anchor.BN;
   fundPda: anchor.web3.PublicKey;
+  tradingPda: anchor.web3.PublicKey;
   shareMintPda: anchor.web3.PublicKey;
   vaultPda: anchor.web3.PublicKey;
   investor: anchor.web3.Keypair;
@@ -28,9 +29,20 @@ export const getContext = async (): Promise<TestContext> => {
   }
   if (!initPromise) {
     initPromise = (async () => {
-      anchor.setProvider(anchor.AnchorProvider.env());
+      const url =
+        process.env.ANCHOR_PROVIDER_URL ?? "http://127.0.0.1:8899";
+      const connection = new anchor.web3.Connection(url, {
+        commitment: "confirmed",
+        disableBlockhashCache: true,
+      });
+      const envProvider = anchor.AnchorProvider.env();
+      const provider = new anchor.AnchorProvider(
+        connection,
+        envProvider.wallet,
+        anchor.AnchorProvider.defaultOptions(),
+      );
+      anchor.setProvider(provider);
       const program = anchor.workspace.fundContract as Program<FundContract>;
-      const provider = anchor.getProvider() as anchor.AnchorProvider;
 
       const configId = new anchor.BN(Date.now());
       const configIdSeed = configId.toArrayLike(Buffer, "le", 8);
@@ -63,6 +75,10 @@ export const getContext = async (): Promise<TestContext> => {
         [Buffer.from("vault"), fundPda.toBuffer()],
         program.programId,
       );
+      const [tradingPda] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("trading"), fundPda.toBuffer()],
+        program.programId,
+      );
 
       cachedContext = {
         program,
@@ -72,6 +88,7 @@ export const getContext = async (): Promise<TestContext> => {
         keeper: provider.wallet.publicKey,
         fundId,
         fundPda,
+        tradingPda,
         shareMintPda,
         vaultPda,
         investor,
@@ -135,10 +152,6 @@ export const getClockUnixTimestamp = async (
 };
 
 export const ensureGlobalConfig = async (ctx: TestContext) => {
-  const info = await ctx.provider.connection.getAccountInfo(ctx.configPda);
-  if (info) {
-    return false;
-  }
   await airdropIfNeeded(
     ctx.provider,
     ctx.provider.wallet.publicKey,
@@ -149,7 +162,61 @@ export const ensureGlobalConfig = async (ctx: TestContext) => {
     ctx.feeTreasury.publicKey,
     anchor.web3.LAMPORTS_PER_SOL,
   );
-
+  const info = await ctx.provider.connection.getAccountInfo(ctx.configPda);
+  if (info) {
+    const configAccount = await ctx.program.account.globalConfig.fetch(
+      ctx.configPda,
+    );
+    const expectedMinManagerDeposit = new anchor.BN(
+      anchor.web3.LAMPORTS_PER_SOL / 10,
+    );
+    const expectedMinWithdrawTimelock = new anchor.BN(0);
+    const expectedMaxWithdrawTimelock = new anchor.BN(31_536_000);
+    const needsUpdate =
+      !configAccount.feeTreasury.equals(ctx.feeTreasury.publicKey) ||
+      !configAccount.solUsdPythFeed.equals(ctx.solPythFeed) ||
+      !configAccount.pythProgramId.equals(ctx.pythProgramId) ||
+      configAccount.depositFeeBps !== 50 ||
+      configAccount.withdrawFeeBps !== 25 ||
+      configAccount.tradeFeeBps !== 10 ||
+      configAccount.maxManagerFeeBps !== 3000 ||
+      configAccount.maxSlippageBps !== 100 ||
+      !configAccount.minManagerDepositLamports.eq(expectedMinManagerDeposit) ||
+      !configAccount.minWithdrawTimelockSecs.eq(expectedMinWithdrawTimelock) ||
+      !configAccount.maxWithdrawTimelockSecs.eq(expectedMaxWithdrawTimelock);
+    if (needsUpdate) {
+      await ctx.program.methods
+        .updateGlobalConfig(
+          ctx.configId,
+          ctx.solPythFeed,
+          ctx.pythProgramId,
+          50,
+          25,
+          10,
+          3000,
+          100,
+          expectedMinManagerDeposit,
+          expectedMinWithdrawTimelock,
+          expectedMaxWithdrawTimelock,
+        )
+        .accounts({
+          config: ctx.configPda,
+          admin: ctx.provider.wallet.publicKey,
+          feeTreasury: ctx.feeTreasury.publicKey,
+        })
+        .rpc();
+    }
+    if (!configAccount.keeper.equals(ctx.keeper)) {
+      await ctx.program.methods
+        .setKeeper(ctx.configId, ctx.keeper)
+        .accounts({
+          config: ctx.configPda,
+          admin: ctx.provider.wallet.publicKey,
+        })
+        .rpc();
+    }
+    return false;
+  }
   await ctx.program.methods
     .initializeGlobalConfig(
       ctx.configId,
@@ -159,8 +226,11 @@ export const ensureGlobalConfig = async (ctx: TestContext) => {
       50,
       25,
       10,
+      3000,
       100,
       new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 10),
+      new anchor.BN(0),
+      new anchor.BN(31_536_000),
     )
     .accounts({
       config: ctx.configPda,
@@ -185,13 +255,17 @@ export const ensureFund = async (ctx: TestContext) => {
   await ctx.program.methods
     .initializeFund(
       ctx.fundId,
+      new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 10),
+      0,
       new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 20),
       new anchor.BN(0),
     )
     .accounts({
       manager: ctx.provider.wallet.publicKey,
       config: ctx.configPda,
+      feeTreasury: ctx.feeTreasury.publicKey,
       fundState: ctx.fundPda,
+      trading: ctx.tradingPda,
       shareMint: ctx.shareMintPda,
       managerShareAccount,
       fundVault: ctx.vaultPda,

@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::errors::ErrorCode;
 use crate::state::fund::{FundState, FUND_TYPE_STRATEGY};
-use crate::state::strategy_config::{StrategyAllocation, StrategyConfig, MAX_STRATEGY_TOKENS};
+use crate::state::strategy::{StrategyAllocation, Strategy, MAX_STRATEGY_TOKENS};
 use crate::state::whitelist::FundWhitelist;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -25,26 +25,26 @@ pub fn set_strategy<'info>(
         ctx.accounts.fund_state.fund_type == FUND_TYPE_STRATEGY,
         ErrorCode::InvalidFundType
     );
-    require!(!allocations.is_empty(), ErrorCode::InvalidStrategyConfig);
-    require!(allocations.len() <= MAX_STRATEGY_TOKENS, ErrorCode::InvalidStrategyConfig);
+    require!(!allocations.is_empty(), ErrorCode::InvalidStrategy);
+    require!(allocations.len() <= MAX_STRATEGY_TOKENS, ErrorCode::InvalidStrategy);
     require!(rebalance_threshold_bps <= 10_000, ErrorCode::InvalidFeeBps);
-    require!(rebalance_cooldown_secs > 0, ErrorCode::InvalidStrategyConfig);
+    require!(rebalance_cooldown_secs > 0, ErrorCode::InvalidStrategy);
     require!(
         ctx.accounts.fund_state.enabled_token_count as usize == allocations.len(),
-        ErrorCode::InvalidStrategyConfig
+        ErrorCode::InvalidStrategy
     );
 
     let mut sum: u32 = 0;
     let mut seen: Vec<Pubkey> = Vec::with_capacity(allocations.len());
     for alloc in allocations.iter() {
-        require!(alloc.weight_bps > 0, ErrorCode::InvalidStrategyConfig);
+        require!(alloc.weight_bps > 0, ErrorCode::InvalidStrategy);
         sum = sum
             .checked_add(alloc.weight_bps as u32)
             .ok_or(ErrorCode::MathOverflow)?;
-        require!(!seen.contains(&alloc.mint), ErrorCode::InvalidStrategyConfig);
+        require!(!seen.contains(&alloc.mint), ErrorCode::InvalidStrategy);
         seen.push(alloc.mint);
     }
-    require!(sum == 10_000, ErrorCode::InvalidStrategyConfig);
+    require!(sum == 10_000, ErrorCode::InvalidStrategy);
 
     require!(
         ctx.remaining_accounts.len() == allocations.len(),
@@ -60,7 +60,7 @@ pub fn set_strategy<'info>(
         require!(whitelist.mint == alloc.mint, ErrorCode::InvalidTokenVault);
     }
 
-    let config = &mut ctx.accounts.strategy_config;
+    let config = &mut ctx.accounts.strategy;
     config.fund = ctx.accounts.fund_state.key();
     config.allocation_count = allocations.len() as u8;
     config.allocations = [StrategyAllocation::default(); MAX_STRATEGY_TOKENS];
@@ -73,7 +73,7 @@ pub fn set_strategy<'info>(
     config.rebalance_threshold_bps = rebalance_threshold_bps;
     config.rebalance_cooldown_secs = rebalance_cooldown_secs;
     config.last_rebalance_ts = Clock::get()?.unix_timestamp;
-    config.bump = ctx.bumps.strategy_config;
+    config.bump = ctx.bumps.strategy;
 
     Ok(())
 }
@@ -91,10 +91,10 @@ pub struct SetStrategy<'info> {
     #[account(
         init,
         payer = manager,
-        space = 8 + StrategyConfig::LEN,
+        space = 8 + Strategy::LEN,
         seeds = [b"strategy", fund_state.key().as_ref()],
         bump
     )]
-    pub strategy_config: Account<'info, StrategyConfig>,
+    pub strategy: Account<'info, Strategy>,
     pub system_program: Program<'info, System>,
 }

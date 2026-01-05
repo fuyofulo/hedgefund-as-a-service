@@ -9,7 +9,7 @@ use pyth_sdk_solana::state::SolanaPriceAccount;
 use crate::errors::ErrorCode;
 use crate::state::fund::{FundState, FundVault, FUND_TYPE_STRATEGY};
 use crate::state::global_config::GlobalConfig;
-use crate::state::strategy_config::{StrategyConfig, StrategyAllocation};
+use crate::state::strategy::{Strategy, StrategyAllocation};
 use crate::state::whitelist::FundWhitelist;
 
 const ORACLE_MAX_AGE_SECS: u64 = 60;
@@ -33,16 +33,15 @@ pub fn rebalance_strategy<'info>(
         ctx.accounts.fund_state.fund_type == FUND_TYPE_STRATEGY,
         ErrorCode::InvalidFundType
     );
-    require!(!ctx.accounts.fund_state.is_locked, ErrorCode::FundLocked);
 
-    let strategy = &mut ctx.accounts.strategy_config;
-    require!(strategy.fund == ctx.accounts.fund_state.key(), ErrorCode::InvalidStrategyConfig);
-    require!(strategy.allocation_count > 0, ErrorCode::InvalidStrategyConfig);
+    let strategy = &mut ctx.accounts.strategy;
+    require!(strategy.fund == ctx.accounts.fund_state.key(), ErrorCode::InvalidStrategy);
+    require!(strategy.allocation_count > 0, ErrorCode::InvalidStrategy);
     require!(
         ctx.accounts.fund_state.enabled_token_count as u8 == strategy.allocation_count,
-        ErrorCode::InvalidStrategyConfig
+        ErrorCode::InvalidStrategy
     );
-    require!(strategy.rebalance_cooldown_secs > 0, ErrorCode::InvalidStrategyConfig);
+    require!(strategy.rebalance_cooldown_secs > 0, ErrorCode::InvalidStrategy);
 
     let fund_key = ctx.accounts.fund_state.key();
     let expected_wsol_vault =
@@ -163,7 +162,7 @@ pub fn rebalance_strategy<'info>(
     }
 
     require!(nav_lamports > 0, ErrorCode::InvalidNav);
-    let weight_bps = target_weight.ok_or(ErrorCode::InvalidStrategyConfig)? as i128;
+    let weight_bps = target_weight.ok_or(ErrorCode::InvalidStrategy)? as i128;
     target_value_lamports = nav_lamports
         .checked_mul(weight_bps)
         .ok_or(ErrorCode::MathOverflow)?
@@ -229,7 +228,7 @@ pub fn rebalance_strategy<'info>(
         infos.push(acc.clone());
     }
 
-    let target_price = target_price.ok_or(ErrorCode::InvalidStrategyConfig)?;
+    let target_price = target_price.ok_or(ErrorCode::InvalidStrategy)?;
 
     if deviation < 0 {
         require!(has_fund_vault, ErrorCode::InvalidTokenVault);
@@ -320,7 +319,7 @@ pub fn rebalance_strategy<'info>(
             sol_price.expo,
         )?;
         let sell_amount = std::cmp::min(sell_amount, target_token_amount);
-        require!(sell_amount > 0, ErrorCode::InvalidStrategyConfig);
+        require!(sell_amount > 0, ErrorCode::InvalidStrategy);
 
         ctx.accounts.fund_token_vault.reload()?;
         let token_before = ctx.accounts.fund_token_vault.amount;
@@ -536,9 +535,9 @@ pub struct RebalanceStrategy<'info> {
     #[account(
         mut,
         seeds = [b"strategy", fund_state.key().as_ref()],
-        bump = strategy_config.bump
+        bump = strategy.bump
     )]
-    pub strategy_config: Account<'info, StrategyConfig>,
+    pub strategy: Account<'info, Strategy>,
     #[account(mut)]
     pub fund_token_vault: Account<'info, TokenAccount>,
     /// CHECK: created as ATA for fund_state + WSOL when needed

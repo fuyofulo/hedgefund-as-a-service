@@ -5,18 +5,45 @@ use anchor_spl::token::{mint_to, Mint, MintTo, Token, TokenAccount};
 use crate::errors::ErrorCode;
 use crate::state::fund::{FundState, FundVault, FUND_TYPE_TRADING};
 use crate::state::global_config::GlobalConfig;
+use crate::state::trading::Trading;
 
 pub fn initialize_fund(
     ctx: Context<InitializeFund>,
     fund_id: u64,
+    initial_deposit_lamports: u64,
+    manager_fee_bps: u16,
     min_investor_deposit_lamports: u64,
     withdraw_timelock_secs: i64,
 ) -> Result<()> {
-    require!(withdraw_timelock_secs >= 0, ErrorCode::InvalidTimelock);
+    require!(
+        withdraw_timelock_secs >= ctx.accounts.config.min_withdraw_timelock_secs,
+        ErrorCode::InvalidTimelock
+    );
+    require!(
+        withdraw_timelock_secs <= ctx.accounts.config.max_withdraw_timelock_secs,
+        ErrorCode::InvalidTimelock
+    );
+    require!(
+        manager_fee_bps <= ctx.accounts.config.max_manager_fee_bps,
+        ErrorCode::InvalidFeeBps
+    );
+    require!(
+        initial_deposit_lamports >= ctx.accounts.config.min_manager_deposit_lamports,
+        ErrorCode::DepositTooSmall
+    );
 
     let config = &ctx.accounts.config;
     let fund = &mut ctx.accounts.fund_state;
-    let deposit_lamports = config.min_manager_deposit_lamports;
+    let fee_bps = config.deposit_fee_bps as u128;
+    let fee_lamports = (initial_deposit_lamports as u128)
+        .checked_mul(fee_bps)
+        .ok_or(ErrorCode::MathOverflow)?
+        .checked_div(10_000)
+        .ok_or(ErrorCode::MathOverflow)? as u64;
+    let net_lamports = initial_deposit_lamports
+        .checked_sub(fee_lamports)
+        .ok_or(ErrorCode::MathOverflow)?;
+    require!(net_lamports > 0, ErrorCode::ZeroShares);
 
     fund.config = config.key();
     fund.manager = ctx.accounts.manager.key();
@@ -24,31 +51,48 @@ pub fn initialize_fund(
     fund.fund_type = FUND_TYPE_TRADING;
     fund.share_mint = ctx.accounts.share_mint.key();
     fund.vault = ctx.accounts.fund_vault.key();
-    fund.total_shares = deposit_lamports;
+    fund.total_shares = net_lamports;
+    fund.manager_fee_bps = manager_fee_bps;
     fund.min_investor_deposit_lamports = min_investor_deposit_lamports;
     fund.withdraw_timelock_secs = withdraw_timelock_secs;
     fund.enabled_token_count = 0;
     fund.active_limit_count = 0;
     fund.active_dca_count = 0;
     fund.next_order_id = 0;
-    fund.is_locked = false;
-    fund.borrow_amount = 0;
-    fund.expected_min_out = 0;
-    fund.snapshot_sol = 0;
-    fund.snapshot_output = 0;
-    fund.output_mint = Pubkey::default();
     fund.bump = ctx.bumps.fund_state;
     fund.share_mint_bump = ctx.bumps.share_mint;
     fund.vault_bump = ctx.bumps.fund_vault;
 
+    let fund_key = fund.key();
+    let trading = &mut ctx.accounts.trading;
+    trading.fund = fund_key;
+    trading.is_locked = false;
+    trading.borrow_amount = 0;
+    trading.expected_min_out = 0;
+    trading.snapshot_sol = 0;
+    trading.snapshot_output = 0;
+    trading.output_mint = Pubkey::default();
+    trading.bump = ctx.bumps.trading;
+
     let transfer_ctx = CpiContext::new(
+        ctx.accounts.system_program.to_account_info(),
+        anchor_lang::system_program::Transfer {
+            from: ctx.accounts.manager.to_account_info(),
+            to: ctx.accounts.fee_treasury.to_account_info(),
+        },
+    );
+    if fee_lamports > 0 {
+        anchor_lang::system_program::transfer(transfer_ctx, fee_lamports)?;
+    }
+
+    let vault_ctx = CpiContext::new(
         ctx.accounts.system_program.to_account_info(),
         anchor_lang::system_program::Transfer {
             from: ctx.accounts.manager.to_account_info(),
             to: ctx.accounts.fund_vault.to_account_info(),
         },
     );
-    anchor_lang::system_program::transfer(transfer_ctx, deposit_lamports)?;
+    anchor_lang::system_program::transfer(vault_ctx, net_lamports)?;
 
     let config_key = config.key();
     let manager_key = ctx.accounts.manager.key();
@@ -71,7 +115,7 @@ pub fn initialize_fund(
         },
         &signer_seeds_set,
     );
-    mint_to(mint_ctx, deposit_lamports)?;
+    mint_to(mint_ctx, net_lamports)?;
 
     Ok(())
 }
@@ -81,7 +125,12 @@ pub fn initialize_fund(
 pub struct InitializeFund<'info> {
     #[account(mut)]
     pub manager: Signer<'info>,
+    #[account(
+        has_one = fee_treasury
+    )]
     pub config: Account<'info, GlobalConfig>,
+    #[account(mut)]
+    pub fee_treasury: SystemAccount<'info>,
     #[account(
         init,
         payer = manager,
@@ -90,6 +139,14 @@ pub struct InitializeFund<'info> {
         bump
     )]
     pub fund_state: Account<'info, FundState>,
+    #[account(
+        init,
+        payer = manager,
+        space = 8 + Trading::LEN,
+        seeds = [b"trading", fund_state.key().as_ref()],
+        bump
+    )]
+    pub trading: Account<'info, Trading>,
     #[account(
         init,
         payer = manager,

@@ -33,8 +33,15 @@ describe("initialize-fund", () => {
     const configAccount = await ctx.program.account.globalConfig.fetch(
       ctx.configPda,
     );
+    const expectedFee = Math.floor(
+      (Number(configAccount.depositFeeBps) *
+        Number(configAccount.minManagerDepositLamports)) /
+        10_000,
+    );
+    const expectedNet =
+      Number(configAccount.minManagerDepositLamports) - expectedFee;
     expect(shareBalance.value.amount).to.equal(
-      configAccount.minManagerDepositLamports.toString(),
+      expectedNet.toString(),
     );
   });
 
@@ -61,6 +68,10 @@ describe("initialize-fund", () => {
       [Buffer.from("vault"), badFundPda.toBuffer()],
       ctx.program.programId,
     );
+    const [badTrading] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("trading"), badFundPda.toBuffer()],
+      ctx.program.programId,
+    );
     const managerShareAccount = await anchor.utils.token.associatedAddress({
       mint: badShareMint,
       owner: ctx.provider.wallet.publicKey,
@@ -68,11 +79,19 @@ describe("initialize-fund", () => {
 
     await expectError(
       ctx.program.methods
-        .initializeFund(badFundId, new anchor.BN(1), new anchor.BN(-1))
+        .initializeFund(
+          badFundId,
+          new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 10),
+          0,
+          new anchor.BN(1),
+          new anchor.BN(-1),
+        )
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
+          feeTreasury: ctx.feeTreasury.publicKey,
           fundState: badFundPda,
+          trading: badTrading,
           shareMint: badShareMint,
           managerShareAccount,
           fundVault: badVault,

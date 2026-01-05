@@ -16,32 +16,39 @@ Build a Solana program that lets a fund manager create a hedge fund, accept SOL 
 ## Non-Goals (v1)
 - Partial withdrawals or automated liquidity management.
 - Cross-program oracle aggregation beyond a single oracle source (pyth/switchboard).
+- Permissionless order execution. Keeper is a trusted executor in v1.
 
 ## Roles
 - Platform (admin): initializes global config, sets fees, manages global whitelist and oracle feeds.
 - Fund manager: creates and manages a fund, initiates trades, sets fund parameters.
 - Investor: deposits SOL, receives shares, requests/executes withdrawal.
-- Keeper (executor): trusted executor for limit/DCA order swaps (permissioned).
+- Keeper (executor): trusted executor for limit/DCA order swaps and strategy rebalances.
 
 ## On-Chain Architecture
 Program owns:
 - Global config PDA (platform parameters).
 - Fund PDA(s) under global config.
+- Trading PDA (trading funds only).
 - Fund share mint (SPL token).
 - Fund treasury vault (program-owned SOL account) and token vaults (SPL token accounts).
 - Fund local whitelist PDAs per token mint.
 - Global whitelist PDAs per token mint.
 - Optional withdrawal request PDAs per investor.
+- Limit/DCA order PDAs + escrow vaults.
+- Strategy PDA (strategy funds only).
 
 ## Accounts / PDAs
 - GlobalConfig PDA: `["config", config_id]`
   - admin pubkey
-  - keeper pubkey (permissioned executor for orders)
-  - fees: deposit_fee_bps, withdraw_fee_bps, trade_fee_bps (initially optional)
-  - max_slippage_bps (oracle-based guardrail for order execution)
-  - min_manager_deposit_lamports
+  - keeper pubkey (permissioned executor)
+  - fee_treasury pubkey
   - sol_usd_pyth_feed (pinned SOL/USD feed)
   - pyth_program_id (pinned Pyth program)
+  - fees: deposit_fee_bps, withdraw_fee_bps, trade_fee_bps
+  - max_manager_fee_bps (cap for manager_fee_bps)
+  - max_slippage_bps (oracle-based guardrail for orders)
+  - min_manager_deposit_lamports
+  - min_withdraw_timelock_secs, max_withdraw_timelock_secs
   - bump
 - GlobalWhitelist PDA: `["global_whitelist", config, mint]`
   - mint pubkey
@@ -50,14 +57,28 @@ Program owns:
   - enabled flag
   - bump
 - Fund PDA: `["fund", config, manager, fund_id]`
+  - config pubkey
   - manager pubkey
   - fund_type (Trading or Strategy)
   - share_mint
   - vault (program-owned PDA)
   - total_shares
-  - min_investor_deposit, withdraw_timelock_secs
+  - manager_fee_bps
+  - min_investor_deposit_lamports
+  - withdraw_timelock_secs
   - enabled_token_count
-  - trade lock state (is_locked, borrow_amount, expected_min_out, snapshot_sol, snapshot_output, output_mint)
+  - active_limit_count
+  - active_dca_count
+  - next_order_id
+  - bump + share_mint_bump + vault_bump
+- Trading PDA (trading funds only): `["trading", fund]`
+  - fund pubkey
+  - is_locked
+  - borrow_amount
+  - expected_min_out
+  - snapshot_sol
+  - snapshot_output
+  - output_mint
   - bump
 - FundWhitelist PDA: `["whitelist", fund, mint]`
   - mint pubkey
@@ -65,8 +86,12 @@ Program owns:
   - pyth_feed (pinned token/USD feed)
   - enabled flag
   - bump
-- StrategyConfig PDA: `["strategy", fund]` (strategy funds only)
-  - allocations (mint + weight_bps), threshold, cooldown, last_rebalance_ts
+- Strategy PDA: `["strategy", fund]`
+  - allocations (mint + weight_bps)
+  - allocation_count
+  - rebalance_threshold_bps
+  - rebalance_cooldown_secs
+  - last_rebalance_ts
 - WithdrawRequest PDA: `["withdraw", fund, investor]`
   - investor pubkey
   - requested_shares
@@ -83,11 +108,11 @@ Program owns:
 ## Instructions (v1)
 1) InitializeGlobalConfig
    - Creates GlobalConfig PDA.
-   - Sets fees, admin, min_manager_deposit, and pinned oracle info.
+   - Sets admin, fee treasury, keeper, pinned oracle info, fee bps, max_manager_fee_bps, max_slippage_bps, min_manager_deposit, and withdraw timelock bounds.
 
 2) UpdateGlobalConfig
-   - Admin updates fee params and pinned oracle info.
-   - Can rotate keeper and slippage guard values.
+   - Admin updates fee params, fee treasury, pinned oracle info, max_manager_fee_bps, max_slippage_bps, min_manager_deposit, and withdraw timelock bounds.
+   - Keeper is managed only via set/revoke.
 
 2a) SetKeeper (admin)
    - Admin sets a new keeper pubkey for order execution.
@@ -97,9 +122,12 @@ Program owns:
 
 3) InitializeFund (trading type)
    - Creates Fund PDA.
-   - Creates share mint.
-   - Manager deposits min SOL into treasury and receives initial shares.
-   - Stores fund params (min deposit, withdraw timelock, etc).
+   - Creates Trading PDA and share mint.
+   - Manager supplies initial_deposit_lamports (must be >= min_manager_deposit).
+   - Requires withdraw_timelock_secs within global bounds.
+   - Deposit fee is sent to fee_treasury; net is deposited into fund vault.
+   - Mints initial shares equal to net deposit.
+   - Stores fund params (manager_fee_bps, min deposit, withdraw timelock, etc).
 
 4) AddToken (single instruction, scoped)
    - Scope = Global: admin creates GlobalWhitelist PDA for mint.
@@ -111,7 +139,8 @@ Program owns:
 
 6) Deposit
    - Investor deposits SOL to fund treasury.
-   - Computes NAV using pinned oracle prices + fund holdings.
+   - Requires `amount_lamports >= min_investor_deposit_lamports`.
+   - Computes NAV using pinned oracle prices + fund holdings + open order escrows.
    - Mints shares to investor based on NAV/share.
    - Applies platform fee (lamports).
    - Rejects if deposit would mint zero shares.
@@ -135,21 +164,21 @@ Program owns:
 10) Borrow (trade start)
    - Manager borrows SOL from fund treasury to a manager-controlled account.
    - Must be in the same transaction as Settle (enforced by instruction sysvar).
-   - Locks the fund and snapshots SOL + output token balances.
-   - Records borrow amount, expected_min_out, and output mint.
+   - Locks the Trading and snapshots SOL + output token balances.
+   - Records borrow amount, expected_min_out, and output mint in Trading.
    - Requires min_out > 0 and the settle instruction to reference the same accounts.
 
 11) Settle (trade end)
    - Validates token delta >= expected_min_out and SOL vault decreased by borrow_amount.
    - Verifies tokens are whitelisted via FundWhitelist PDA.
-   - Unlocks the fund and clears trade state.
+   - Unlocks Trading and clears trade state fields.
    - If validation fails, whole transaction reverts.
 
 12) CreateLimitOrder
    - Manager-only. Creates a per-order PDA and escrows the spending asset.
    - Buy order: escrow SOL from fund vault into an order SOL vault PDA.
    - Sell order: escrow tokens from fund token ATA into an order token vault ATA owned by an order vault authority PDA.
-   - Stores limit price + oracle feed and min_out for slippage protection.
+   - Increments `active_limit_count`.
 
 13) ExecuteLimitOrder
    - Keeper-only execution.
@@ -157,18 +186,19 @@ Program owns:
    - Checks price trigger (BUY: price <= limit, SELL: price >= limit).
    - Executes swap via CPI (Jupiter) using escrowed assets as input and fund vaults as outputs.
    - Verifies post-swap deltas >= min_out and oracle-based slippage guard.
-   - Closes/marks order executed and returns any leftover escrow.
+   - Marks order executed, closes escrow, decrements `active_limit_count`.
 
 14) CancelLimitOrder
    - Manager-only. Cancels open order and refunds escrow back to fund vaults.
    - Closes order vaults and order PDA.
+   - Decrements `active_limit_count`.
 
 15) CreateDcaOrder
    - Manager-only. Creates a per-order PDA and escrows the spending asset.
    - Buy DCA: escrow SOL from fund vault into a DCA order SOL vault PDA.
    - Sell DCA: escrow tokens from fund token ATA into a DCA order token vault ATA owned by a vault authority PDA.
    - Stores total amount, slice amount, interval, min_out, next_exec_ts, and oracle feed.
-   - Enforces `active_dca_count < MAX_ACTIVE_DCA`.
+   - Increments `active_dca_count` (max active enforced).
 
 16) ExecuteDcaOrder
    - Keeper-only execution.
@@ -176,6 +206,7 @@ Program owns:
    - Executes one slice via Jupiter CPI.
    - Verifies post-swap deltas >= min_out and oracle-based slippage guard.
    - Updates remaining amount and next_exec_ts; closes and refunds when complete.
+   - Decrements `active_dca_count` when order completes.
 
 17) CancelDcaOrder
    - Manager-only. Cancels open DCA order and refunds escrow back to fund vaults.
@@ -184,27 +215,47 @@ Program owns:
 18) InitializeStrategyFund (strategy type)
    - Creates Fund PDA with `fund_type = Strategy`.
    - Creates share mint and fund vault.
-   - Manager deposits min SOL and receives initial shares.
+   - Manager supplies initial_deposit_lamports (must be >= min_manager_deposit).
+   - Requires withdraw_timelock_secs within global bounds.
+   - Deposit fee is sent to fee_treasury; net is deposited into fund vault.
+   - Mints initial shares equal to net deposit.
 
 19) SetStrategy (strategy fund only, one-time)
-   - Creates StrategyConfig PDA with target allocations.
+   - Creates Strategy PDA with target allocations.
    - Requires allocations sum to 10,000 bps.
    - Requires each mint to be enabled in fund whitelist.
    - Requires `enabled_token_count == allocation_count`.
+   - Stores rebalance_threshold_bps and rebalance_cooldown_secs, sets last_rebalance_ts to now.
 
 20) RebalanceStrategy (keeper-only)
-   - Rebalances one target mint per call using Jupiter CPI.
+   - Rebalances one target mint per call.
    - Enforces cooldown and threshold.
+   - Requires WSOL vault to be swept before rebalance (no wrapped SOL balance).
    - Uses NAV + target weights to compute buy/sell amount.
    - Uses oracle-based slippage guard + `min_out`.
+   - Validation accounts are separate from CPI accounts (validation triplets are not passed to Jupiter).
+
+21) SweepWsol (keeper-only)
+   - Closes the fund WSOL ATA to the fund vault.
+   - Used to ensure SOL liquidity is in the fund vault and WSOL is zero before rebalances.
 
 ## NAV & Pricing
-- NAV = SOL treasury + sum(value of token vault balances).
+- NAV = SOL treasury + sum(value of token vault balances) + open order escrows.
 - Token value = oracle price * quantity.
 - Use pinned Pyth price feeds in v1 (SOL/USD + per-token feeds).
-- Use conservative pricing to avoid manipulation (e.g., strict staleness checks).
-- NAV requires full token list: remaining accounts must include SOL feed + triplets for every enabled token, ordered by mint pubkey.
-- Token vaults must be the ATA for (fund PDA, mint), and whitelist PDAs must match the expected seeds.
+- Use strict staleness checks and confidence bounds.
+
+NAV completeness:
+- `remaining_accounts` layout is strict.
+- Base layout: `[sol_feed] + 3 * enabled_token_count`.
+- Then limit order triplets (per active order): `[limit_order, order_sol_vault, order_token_vault]`.
+- Then DCA order triplets (per active order): `[dca_order, dca_sol_vault, dca_token_vault]`.
+- Base token triplets are ordered by mint pubkey ascending.
+- Limit/DCA triplets are ordered by order PDA pubkey ascending.
+
+Order escrow inclusion:
+- BUY orders add their SOL vault lamports into NAV.
+- SELL orders add their escrowed token value into NAV using the token price map.
 
 ## Fee Model (v1)
 - Deposit fee: take lamports from deposit before minting shares.
@@ -212,9 +263,9 @@ Program owns:
 - Fee destination: platform treasury (set in GlobalConfig).
 
 ## Security & Invariants
-- Only admin updates GlobalConfig.
+- Only admin updates GlobalConfig or global whitelist.
 - Only admin can set/revoke the keeper key.
-- Only manager can call InitializeFund, AddTokenToFund, Borrow/Settle.
+- Only manager can create funds, add/remove fund tokens, or trade.
 - Deposit/withdraw enforce min deposit and timelock.
 - Trading only allowed for whitelisted tokens.
 - Borrow/Settle must be in same transaction (instruction sysvar checks).
@@ -234,187 +285,7 @@ Program owns:
 - Use Pyth for oracle prices.
 - Fund seed includes `fund_id` to allow multiple funds per manager.
 - Precision is critical; avoid rounding where possible and use integer math with explicit scaling.
-
-## Limit Orders (v1)
-
-### Overview
-Limit orders use a keeper-execution model while keeping custody in program-controlled vaults. Orders escrow the asset that will be spent and only release funds through a validated swap.
-
-### Order PDA
-Seeds:
-
-```
-["limit_order", fund_state.key(), order_id_le_bytes]
-```
-
-`order_id` is an incrementing `u64` stored in `FundState.next_order_id`.
-
-Fields (example):
-- `fund: Pubkey`
-- `side: u8` (0 = Buy, 1 = Sell)
-- `mint: Pubkey` (target mint)
-- `amount_in: u64` (SOL lamports for Buy, token units for Sell)
-- `min_out: u64` (slippage guard)
-- `limit_price: i64`
-- `price_expo: i32`
-- `price_feed: Pubkey`
-- `pyth_program_id: Pubkey` (or read from GlobalConfig)
-- `created_ts: i64`
-- `expiry_ts: i64` (0 = no expiry)
-- `status: u8` (0 = open, 1 = executed, 2 = cancelled)
-- `bump: u8`
-
-### Escrow Vaults
-- Buy order SOL vault (system account PDA):
-  - Seeds: `["limit_order_sol_vault", order.key()]`
-- Sell order token vault:
-  - Vault authority PDA seeds: `["limit_order_vault_auth", order.key()]`
-  - Token vault ATA: `ATA(vault_auth, mint)`
-
-### CreateLimitOrder (manager-only)
-Checks:
-- Manager authorization.
-- Whitelist enabled and mint matches.
-- `amount_in > 0` and `min_out > 0`.
-Actions:
-- Create order PDA and record order state.
-- Escrow assets:
-  - Buy: move SOL from fund vault to order SOL vault.
-  - Sell: transfer tokens from fund ATA to order token vault.
-
-### ExecuteLimitOrder (keeper-only)
-Checks:
-- `order.status == open`
-- `order.fund == fund_state.key()`
-- Oracle feed key + owner (Pyth), freshness, and confidence.
-- Trigger condition (BUY: `price <= limit`, SELL: `price >= limit`).
-Actions:
-- Execute swap CPI from escrow vault to fund vaults.
-- Verify post-swap deltas >= `min_out` and oracle-based slippage guard.
-- Mark order executed and close escrow vaults.
-
-### CancelLimitOrder (manager-only)
-Checks:
-- `order.status == open`
-- Manager authorization.
-Actions:
-- Refund escrow back to fund vaults.
-- Close order vaults and order PDA.
-
-### Swap CPI Requirements
-- Input account must be the escrow vault (SOL vault PDA or token vault ATA).
-- Output account must be a fund-owned vault:
-  - SOL: fund vault PDA
-  - Tokens: ATA of `(fund_state, mint)`
-- Post-swap verification required for `min_out` and full escrow usage (no partial fills in v1).
-
-## DCA Orders (v1)
-
-### Overview
-DCA orders execute on a fixed interval (time-based) instead of a price trigger. They use the same escrow model as limit orders and a keeper for execution.
-
-### Order PDA
-Seeds:
-
-```
-["dca_order", fund_state.key(), order_id_le_bytes]
-```
-
-Fields (example):
-- `fund: Pubkey`
-- `side: u8` (0 = Buy, 1 = Sell)
-- `mint: Pubkey`
-- `total_amount: u64`
-- `slice_amount: u64`
-- `remaining_amount: u64`
-- `interval_secs: i64`
-- `next_exec_ts: i64`
-- `min_out: u64`
-- `price_feed: Pubkey`
-- `pyth_program_id: Pubkey`
-- `expiry_ts: i64` (0 = no expiry)
-- `status: u8` (open/executed/cancelled)
-- `bump: u8`
-
-### Escrow Vaults
-- Buy DCA SOL vault (system account PDA):
-  - Seeds: `["dca_order_sol_vault", order.key()]`
-- Sell DCA token vault:
-  - Vault authority PDA seeds: `["dca_order_vault_auth", order.key()]`
-  - Token vault ATA: `ATA(vault_auth, mint)`
-
-### CreateDcaOrder (manager-only)
-Checks:
-- Manager authorization.
-- Whitelist enabled and mint matches.
-- `total_amount > 0`, `slice_amount > 0`, `slice_amount <= total_amount`.
-- `interval_secs > 0`, `min_out > 0`.
-- `active_dca_count < MAX_ACTIVE_DCA`.
-Actions:
-- Create order PDA and record order state (`next_exec_ts = now + interval_secs`).
-- Escrow assets:
-  - Buy: move SOL from fund vault to order SOL vault.
-  - Sell: transfer tokens from fund ATA to order token vault.
-
-### ExecuteDcaOrder (keeper-only)
-Checks:
-- `order.status == open`
-- `now >= next_exec_ts`
-- Not expired if `expiry_ts` is set.
-- Oracle feed key/owner (Pyth), freshness, confidence.
-Actions:
-- Execute one slice via Jupiter CPI.
-- Verify post-swap deltas >= `min_out` and oracle-based slippage guard.
-- Update `remaining_amount` and `next_exec_ts`.
-- If `remaining_amount == 0`, mark executed, close vaults, and return any leftover SOL to the fund vault.
-
-### CancelDcaOrder (manager-only)
-Checks:
-- `order.status == open`
-- Manager authorization.
-Actions:
-- Refund escrow back to fund vaults.
-- Close order token vault and update `active_dca_count`.
-
-## Strategy Funds (v1)
-
-### Overview
-Strategy funds use preallocated target weights and keeper-driven rebalancing. The fund type is fixed at creation and cannot be changed.
-
-### Fund Type
-- `fund_type = Trading` allows borrow/settle + limit/DCA.
-- `fund_type = Strategy` disables trading instructions and enables strategy rebalancing.
-
-### StrategyConfig PDA
-Seeds:
-```
-["strategy", fund_state.key()]
-```
-
-Fields:
-- `allocations`: fixed array (max 8) of `(mint, weight_bps)`
-- `allocation_count`
-- `rebalance_threshold_bps`
-- `rebalance_cooldown_secs`
-- `last_rebalance_ts`
-
-### SetStrategy (one-time)
-- Manager-only.
-- Requires allocations sum to 10,000 bps.
-- Requires all mints to be enabled in the fund whitelist.
-- Requires `enabled_token_count == allocation_count`.
-- Creates the StrategyConfig PDA; cannot be called again.
-
-### RebalanceStrategy (keeper-only)
-- One token per call.
-- Requires cooldown elapsed and deviation above threshold.
-- Uses NAV + target weights to compute buy/sell amount.
-- Swaps via Jupiter CPI using fund vaults as source/destination.
-- Uses oracle-based slippage guard and `min_out`.
-
-## Open Questions
-- Exact NAV precision math and integer scaling strategy.
-- Token vault lifecycle (sweeping/burning for full liquidation).
+- Keeper is a trusted executor for orders and rebalancing in v1.
 
 ## Mainnet Readiness Checklist
 - Security review/audit of all instructions and PDA seed usage.
@@ -429,3 +300,4 @@ Fields:
 - Finalize fee parameters and slippage guard (max_slippage_bps).
 - On-chain upgrade authority plan (lock/transfer authority post-deploy).
 - Incident response runbook (pause, revoke keeper, emergency withdrawals).
+- Ensure WSOL sweep workflow is reliable and automated by the keeper.

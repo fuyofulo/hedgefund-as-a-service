@@ -498,14 +498,16 @@ describe("deposit", () => {
     await ctx.program.methods
       .updateGlobalConfig(
         ctx.configId,
-        configBefore.keeper,
         configBefore.solUsdPythFeed,
         configBefore.pythProgramId,
         10_000,
         configBefore.withdrawFeeBps,
         configBefore.tradeFeeBps,
+        configBefore.maxManagerFeeBps,
         configBefore.maxSlippageBps,
         configBefore.minManagerDepositLamports,
+        configBefore.minWithdrawTimelockSecs,
+        configBefore.maxWithdrawTimelockSecs,
       )
       .accounts({
         config: ctx.configPda,
@@ -544,14 +546,16 @@ describe("deposit", () => {
     await ctx.program.methods
       .updateGlobalConfig(
         ctx.configId,
-        configBefore.keeper,
         configBefore.solUsdPythFeed,
         configBefore.pythProgramId,
         configBefore.depositFeeBps,
         configBefore.withdrawFeeBps,
         configBefore.tradeFeeBps,
+        configBefore.maxManagerFeeBps,
         configBefore.maxSlippageBps,
         configBefore.minManagerDepositLamports,
+        configBefore.minWithdrawTimelockSecs,
+        configBefore.maxWithdrawTimelockSecs,
       )
       .accounts({
         config: ctx.configPda,

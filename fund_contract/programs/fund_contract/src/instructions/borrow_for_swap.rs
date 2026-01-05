@@ -8,6 +8,7 @@ use anchor_spl::token::TokenAccount;
 use crate::errors::ErrorCode;
 use crate::state::fund::{FundState, FundVault, FUND_TYPE_TRADING};
 use crate::state::global_config::GlobalConfig;
+use crate::state::trading::Trading;
 use crate::state::whitelist::FundWhitelist;
 
 pub fn borrow_for_swap<'info>(
@@ -15,7 +16,7 @@ pub fn borrow_for_swap<'info>(
     amount_in: u64,
     min_amount_out: u64,
 ) -> Result<()> {
-    require!(!ctx.accounts.fund_state.is_locked, ErrorCode::FundLocked);
+    require!(!ctx.accounts.trading.is_locked, ErrorCode::FundLocked);
     require!(amount_in > 0, ErrorCode::MathOverflow);
     require!(min_amount_out > 0, ErrorCode::InvalidMinOut);
     require!(
@@ -73,6 +74,7 @@ pub fn borrow_for_swap<'info>(
         ctx.accounts.manager.key(),
         ctx.accounts.config.key(),
         ctx.accounts.fund_state.key(),
+        ctx.accounts.trading.key(),
         ctx.accounts.fund_vault.key(),
         ctx.accounts.output_whitelist.key(),
         ctx.accounts.output_token_vault.key(),
@@ -97,12 +99,12 @@ pub fn borrow_for_swap<'info>(
     }
     require!(found, ErrorCode::MissingSettleInstruction);
 
-    ctx.accounts.fund_state.is_locked = true;
-    ctx.accounts.fund_state.borrow_amount = amount_in;
-    ctx.accounts.fund_state.expected_min_out = min_amount_out;
-    ctx.accounts.fund_state.snapshot_sol = vault_balance;
-    ctx.accounts.fund_state.snapshot_output = ctx.accounts.output_token_vault.amount;
-    ctx.accounts.fund_state.output_mint = ctx.accounts.output_whitelist.mint;
+    ctx.accounts.trading.is_locked = true;
+    ctx.accounts.trading.borrow_amount = amount_in;
+    ctx.accounts.trading.expected_min_out = min_amount_out;
+    ctx.accounts.trading.snapshot_sol = vault_balance;
+    ctx.accounts.trading.snapshot_output = ctx.accounts.output_token_vault.amount;
+    ctx.accounts.trading.output_mint = ctx.accounts.output_whitelist.mint;
 
     {
         let fund_vault_info = ctx.accounts.fund_vault.to_account_info();
@@ -139,6 +141,13 @@ pub struct BorrowForSwap<'info> {
         has_one = config
     )]
     pub fund_state: Account<'info, FundState>,
+    #[account(
+        mut,
+        seeds = [b"trading", fund_state.key().as_ref()],
+        bump = trading.bump,
+        constraint = trading.fund == fund_state.key()
+    )]
+    pub trading: Account<'info, Trading>,
     #[account(
         mut,
         seeds = [b"vault", fund_state.key().as_ref()],

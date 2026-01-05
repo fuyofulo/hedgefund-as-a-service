@@ -21,8 +21,11 @@ pub mod fund_contract {
         deposit_fee_bps: u16,
         withdraw_fee_bps: u16,
         trade_fee_bps: u16,
+        max_manager_fee_bps: u16,
         max_slippage_bps: u16,
         min_manager_deposit_lamports: u64,
+        min_withdraw_timelock_secs: i64,
+        max_withdraw_timelock_secs: i64,
     ) -> Result<()> {
         instructions::initialize_global_config::initialize_global_config(
             ctx,
@@ -33,34 +36,41 @@ pub mod fund_contract {
             deposit_fee_bps,
             withdraw_fee_bps,
             trade_fee_bps,
+            max_manager_fee_bps,
             max_slippage_bps,
             min_manager_deposit_lamports,
+            min_withdraw_timelock_secs,
+            max_withdraw_timelock_secs,
         )
     }
 
     pub fn update_global_config(
         ctx: Context<UpdateGlobalConfig>,
         config_id: u64,
-        keeper: Pubkey,
         sol_usd_pyth_feed: Pubkey,
         pyth_program_id: Pubkey,
         deposit_fee_bps: u16,
         withdraw_fee_bps: u16,
         trade_fee_bps: u16,
+        max_manager_fee_bps: u16,
         max_slippage_bps: u16,
         min_manager_deposit_lamports: u64,
+        min_withdraw_timelock_secs: i64,
+        max_withdraw_timelock_secs: i64,
     ) -> Result<()> {
         instructions::update_global_config::update_global_config(
             ctx,
             config_id,
-            keeper,
             sol_usd_pyth_feed,
             pyth_program_id,
             deposit_fee_bps,
             withdraw_fee_bps,
             trade_fee_bps,
+            max_manager_fee_bps,
             max_slippage_bps,
             min_manager_deposit_lamports,
+            min_withdraw_timelock_secs,
+            max_withdraw_timelock_secs,
         )
     }
 
@@ -84,12 +94,16 @@ pub mod fund_contract {
     pub fn initialize_fund(
         ctx: Context<InitializeFund>,
         fund_id: u64,
+        initial_deposit_lamports: u64,
+        manager_fee_bps: u16,
         min_investor_deposit_lamports: u64,
         withdraw_timelock_secs: i64,
     ) -> Result<()> {
         instructions::initialize_fund::initialize_fund(
             ctx,
             fund_id,
+            initial_deposit_lamports,
+            manager_fee_bps,
             min_investor_deposit_lamports,
             withdraw_timelock_secs,
         )
@@ -98,12 +112,16 @@ pub mod fund_contract {
     pub fn initialize_strategy_fund(
         ctx: Context<InitializeStrategyFund>,
         fund_id: u64,
+        initial_deposit_lamports: u64,
+        manager_fee_bps: u16,
         min_investor_deposit_lamports: u64,
         withdraw_timelock_secs: i64,
     ) -> Result<()> {
         instructions::initialize_strategy_fund::initialize_strategy_fund(
             ctx,
             fund_id,
+            initial_deposit_lamports,
+            manager_fee_bps,
             min_investor_deposit_lamports,
             withdraw_timelock_secs,
         )

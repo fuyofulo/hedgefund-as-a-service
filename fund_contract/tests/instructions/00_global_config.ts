@@ -29,10 +29,13 @@ describe("global-config", () => {
     expect(configAccount.depositFeeBps).to.equal(50);
     expect(configAccount.withdrawFeeBps).to.equal(25);
     expect(configAccount.tradeFeeBps).to.equal(10);
+    expect(configAccount.maxManagerFeeBps).to.equal(3000);
     expect(configAccount.maxSlippageBps).to.equal(100);
     expect(configAccount.minManagerDepositLamports.toNumber()).to.equal(
       Math.floor(anchor.web3.LAMPORTS_PER_SOL / 10),
     );
+    expect(configAccount.minWithdrawTimelockSecs.toNumber()).to.equal(0);
+    expect(configAccount.maxWithdrawTimelockSecs.toNumber()).to.equal(31_536_000);
   });
 
   it("Updates global config", async () => {
@@ -42,22 +45,27 @@ describe("global-config", () => {
     const newDepositFeeBps = 75;
     const newWithdrawFeeBps = 35;
     const newTradeFeeBps = 20;
+    const newMaxManagerFeeBps = 2500;
     const newMaxSlippageBps = 150;
     const newMinManagerDepositLamports = new anchor.BN(
       anchor.web3.LAMPORTS_PER_SOL / 5,
     );
+    const newMinWithdrawTimelockSecs = new anchor.BN(60);
+    const newMaxWithdrawTimelockSecs = new anchor.BN(86_400);
 
     await ctx.program.methods
       .updateGlobalConfig(
         ctx.configId,
-        ctx.keeper,
         ctx.solPythFeed,
         ctx.pythProgramId,
         newDepositFeeBps,
         newWithdrawFeeBps,
         newTradeFeeBps,
+        newMaxManagerFeeBps,
         newMaxSlippageBps,
         newMinManagerDepositLamports,
+        newMinWithdrawTimelockSecs,
+        newMaxWithdrawTimelockSecs,
       )
       .accounts({
         config: ctx.configPda,
@@ -72,9 +80,16 @@ describe("global-config", () => {
     expect(configAccount.depositFeeBps).to.equal(newDepositFeeBps);
     expect(configAccount.withdrawFeeBps).to.equal(newWithdrawFeeBps);
     expect(configAccount.tradeFeeBps).to.equal(newTradeFeeBps);
+    expect(configAccount.maxManagerFeeBps).to.equal(newMaxManagerFeeBps);
     expect(configAccount.maxSlippageBps).to.equal(newMaxSlippageBps);
     expect(configAccount.minManagerDepositLamports.toNumber()).to.equal(
       newMinManagerDepositLamports.toNumber(),
+    );
+    expect(configAccount.minWithdrawTimelockSecs.toNumber()).to.equal(
+      newMinWithdrawTimelockSecs.toNumber(),
+    );
+    expect(configAccount.maxWithdrawTimelockSecs.toNumber()).to.equal(
+      newMaxWithdrawTimelockSecs.toNumber(),
     );
   });
 
@@ -98,6 +113,9 @@ describe("global-config", () => {
           0,
           0,
           0,
+          0,
+          new anchor.BN(1),
+          new anchor.BN(0),
           new anchor.BN(1),
         )
         .accounts({
@@ -120,13 +138,15 @@ describe("global-config", () => {
       ctx.program.methods
         .updateGlobalConfig(
           ctx.configId,
-          ctx.keeper,
           ctx.solPythFeed,
           ctx.pythProgramId,
           10,
           10,
           10,
           0,
+          0,
+          new anchor.BN(1),
+          new anchor.BN(0),
           new anchor.BN(1),
         )
         .accounts({
@@ -197,8 +217,11 @@ describe("global-config", () => {
         50,
         25,
         10,
+        3000,
         100,
         new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 10),
+        new anchor.BN(0),
+        new anchor.BN(86_400),
       )
       .accounts({
         config: configPda,

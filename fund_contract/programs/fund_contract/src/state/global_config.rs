@@ -11,11 +11,15 @@ pub struct GlobalConfig {
     pub deposit_fee_bps: u16,
     pub withdraw_fee_bps: u16,
     pub trade_fee_bps: u16,
+    pub max_manager_fee_bps: u16,
     pub max_slippage_bps: u16,
     pub min_manager_deposit_lamports: u64,
+    pub min_withdraw_timelock_secs: i64,
+    pub max_withdraw_timelock_secs: i64,
     pub bump: u8,
 }
 
 impl GlobalConfig {
-    pub const LEN: usize = 8 + 32 + 32 + 32 + 32 + 32 + 2 + 2 + 2 + 2 + 8 + 1;
+    pub const LEN: usize =
+        8 + 32 + 32 + 32 + 32 + 32 + 2 + 2 + 2 + 2 + 2 + 8 + 8 + 8 + 1;
 }

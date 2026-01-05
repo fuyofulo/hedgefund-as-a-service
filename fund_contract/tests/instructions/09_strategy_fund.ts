@@ -66,12 +66,15 @@ const createStrategyFund = async (
   await ctx.program.methods
     .initializeStrategyFund(
       fundId,
+      new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 10),
+      0,
       new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 20),
       new anchor.BN(0),
     )
     .accounts({
       manager: ctx.provider.wallet.publicKey,
       config: ctx.configPda,
+      feeTreasury: ctx.feeTreasury.publicKey,
       fundState: fundPda,
       shareMint: shareMintPda,
       managerShareAccount,
@@ -174,12 +177,15 @@ describe("strategy-fund", () => {
       ctx.program.methods
         .initializeStrategyFund(
           fundId,
+          new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 10),
+          0,
           new anchor.BN(anchor.web3.LAMPORTS_PER_SOL / 20),
           new anchor.BN(-1),
         )
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
+          feeTreasury: ctx.feeTreasury.publicKey,
           fundState: fundPda,
           shareMint: shareMintPda,
           managerShareAccount,
@@ -215,7 +221,7 @@ describe("strategy-fund", () => {
       .accounts({
         manager: ctx.provider.wallet.publicKey,
         fundState: fundPda,
-        strategyConfig: strategyPda,
+        strategy: strategyPda,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .remainingAccounts([
@@ -224,7 +230,7 @@ describe("strategy-fund", () => {
       ])
       .rpc();
 
-    const strategy = await ctx.program.account.strategyConfig.fetch(strategyPda);
+    const strategy = await ctx.program.account.strategy.fetch(strategyPda);
     expect(strategy.allocationCount).to.equal(2);
   });
 
@@ -248,7 +254,7 @@ describe("strategy-fund", () => {
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           fundState: ctx.fundPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc(),
@@ -280,7 +286,7 @@ describe("strategy-fund", () => {
         .accounts({
           manager: rogue.publicKey,
           fundState: fundPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .signers([rogue])
@@ -312,11 +318,11 @@ describe("strategy-fund", () => {
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           fundState: fundPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc(),
-      "InvalidStrategyConfig",
+      "InvalidStrategy",
     );
   });
 
@@ -342,11 +348,11 @@ describe("strategy-fund", () => {
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           fundState: fundPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc(),
-      "InvalidStrategyConfig",
+      "InvalidStrategy",
     );
   });
 
@@ -372,11 +378,11 @@ describe("strategy-fund", () => {
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           fundState: fundPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc(),
-      "InvalidStrategyConfig",
+      "InvalidStrategy",
     );
   });
 
@@ -398,11 +404,11 @@ describe("strategy-fund", () => {
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           fundState: fundPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc(),
-      "InvalidStrategyConfig",
+      "InvalidStrategy",
     );
   });
 
@@ -423,7 +429,7 @@ describe("strategy-fund", () => {
       .accounts({
         manager: ctx.provider.wallet.publicKey,
         fundState: fundPda,
-        strategyConfig: strategyPda,
+        strategy: strategyPda,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .remainingAccounts([
@@ -451,7 +457,7 @@ describe("strategy-fund", () => {
           config: ctx.configPda,
           fundState: fundPda,
           fundVault: vaultPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           fundTokenVault: token.fundTokenVault,
           fundWsolVault,
           wsolMint: WSOL_MINT,
@@ -484,7 +490,7 @@ describe("strategy-fund", () => {
       .accounts({
         manager: ctx.provider.wallet.publicKey,
         fundState: fundPda,
-        strategyConfig: strategyPda,
+        strategy: strategyPda,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .remainingAccounts([
@@ -505,7 +511,7 @@ describe("strategy-fund", () => {
           config: ctx.configPda,
           fundState: fundPda,
           fundVault: vaultPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           fundTokenVault: token.fundTokenVault,
           fundWsolVault,
           wsolMint: WSOL_MINT,
@@ -537,7 +543,7 @@ describe("strategy-fund", () => {
       .accounts({
         manager: ctx.provider.wallet.publicKey,
         fundState: fundPda,
-        strategyConfig: strategyPda,
+        strategy: strategyPda,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .remainingAccounts([
@@ -571,7 +577,7 @@ describe("strategy-fund", () => {
           config: ctx.configPda,
           fundState: fundPda,
           fundVault: vaultPda,
-          strategyConfig: strategyPda,
+          strategy: strategyPda,
           fundTokenVault: token.fundTokenVault,
           fundWsolVault: fundWsolVault.address,
           wsolMint: WSOL_MINT,

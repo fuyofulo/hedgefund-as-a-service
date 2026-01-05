@@ -31,6 +31,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         managerReceive: ctx.provider.wallet.publicKey,
         outputWhitelist: token.fundWhitelistPda,
@@ -53,6 +54,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         outputWhitelist: token.fundWhitelistPda,
         outputTokenVault: token.fundTokenVault,
@@ -70,15 +72,17 @@ describe("borrow-settle", () => {
     const tokenAfter = await ctx.provider.connection.getTokenAccountBalance(
       token.fundTokenVault,
     );
-    const fundState = await ctx.program.account.fundState.fetch(ctx.fundPda);
+    const trading = await ctx.program.account.trading.fetch(
+      ctx.tradingPda,
+    );
 
     expect(fundVaultBefore - fundVaultAfter).to.equal(amountIn.toNumber());
     expect(Number(tokenAfter.value.amount)).to.equal(
       Number(tokenBefore.value.amount) + minOut.toNumber() + 1000,
     );
-    expect(fundState.isLocked).to.equal(false);
-    expect(fundState.borrowAmount.toNumber()).to.equal(0);
-    expect(fundState.expectedMinOut.toNumber()).to.equal(0);
+    expect(trading.isLocked).to.equal(false);
+    expect(trading.borrowAmount.toNumber()).to.equal(0);
+    expect(trading.expectedMinOut.toNumber()).to.equal(0);
   });
 
   it("Rejects borrow without settle in same transaction", async () => {
@@ -97,6 +101,7 @@ describe("borrow-settle", () => {
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           managerReceive: ctx.provider.wallet.publicKey,
           outputWhitelist: token.fundWhitelistPda,
@@ -125,6 +130,7 @@ describe("borrow-settle", () => {
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           outputWhitelist: token.fundWhitelistPda,
           outputTokenVault: token.fundTokenVault,
@@ -151,6 +157,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         managerReceive: ctx.provider.wallet.publicKey,
         outputWhitelist: token.fundWhitelistPda,
@@ -166,6 +173,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         outputWhitelist: token.fundWhitelistPda,
         outputTokenVault: token.fundTokenVault,
@@ -176,14 +184,17 @@ describe("borrow-settle", () => {
 
     await expectError(ctx.provider.sendAndConfirm(tx, []), "InvalidTokenVault");
 
-    const fundState = await ctx.program.account.fundState.fetch(ctx.fundPda);
-    if (fundState.isLocked) {
+    const trading = await ctx.program.account.trading.fetch(
+      ctx.tradingPda,
+    );
+    if (trading.isLocked) {
       const unlockIx = await ctx.program.methods
         .settleSwap()
         .accounts({
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+          trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           outputWhitelist: token.fundWhitelistPda,
           outputTokenVault: token.fundTokenVault,
@@ -211,6 +222,7 @@ describe("borrow-settle", () => {
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           managerReceive: ctx.provider.wallet.publicKey,
           outputWhitelist: token.fundWhitelistPda,
@@ -241,6 +253,7 @@ describe("borrow-settle", () => {
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           managerReceive: ctx.provider.wallet.publicKey,
           outputWhitelist: token.fundWhitelistPda,
@@ -272,6 +285,7 @@ describe("borrow-settle", () => {
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           managerReceive: ctx.provider.wallet.publicKey,
           outputWhitelist: token.fundWhitelistPda,
@@ -302,6 +316,7 @@ describe("borrow-settle", () => {
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           managerReceive: ctx.provider.wallet.publicKey,
           outputWhitelist: token.fundWhitelistPda,
@@ -333,6 +348,7 @@ describe("borrow-settle", () => {
           manager: ctx.provider.wallet.publicKey,
           config: ctx.configPda,
           fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
           fundVault: ctx.vaultPda,
           managerReceive: receiver.publicKey,
           outputWhitelist: token.fundWhitelistPda,
@@ -362,6 +378,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         managerReceive: ctx.provider.wallet.publicKey,
         outputWhitelist: token.fundWhitelistPda,
@@ -383,6 +400,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         outputWhitelist: token.fundWhitelistPda,
         outputTokenVault: token.fundTokenVault,
@@ -416,6 +434,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         managerReceive: ctx.provider.wallet.publicKey,
         outputWhitelist: tokenA.fundWhitelistPda,
@@ -431,6 +450,7 @@ describe("borrow-settle", () => {
         manager: ctx.provider.wallet.publicKey,
         config: ctx.configPda,
         fundState: ctx.fundPda,
+        trading: ctx.tradingPda,
         fundVault: ctx.vaultPda,
         outputWhitelist: tokenB.fundWhitelistPda,
         outputTokenVault: tokenB.fundTokenVault,
